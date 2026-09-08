@@ -79,3 +79,31 @@ generates and doesn't look.
 ## Relationship to BBFT
 BBFT's v1 cross-slot unlock feature is this world. When BBFT gets there it
 imports Roster rather than reimplementing the gate.
+
+## Findings (implementation, 2026-09)
+
+Everything above generates and plays as designed, with three corrections.
+
+1. **Items and locations are per-multiworld, so the data package is rebuilt at
+   generation time.** `Unlock: <slot>` / `Started: <slot>` names depend on the
+   other slots, but `item_name_to_id` is a class variable that Archipelago hashes
+   into a data package at import. `stage_generate_early` rebuilds the tables
+   (ids are `0x520000 + player id`) and re-registers
+   `worlds.network_data_package["games"]["Roster"]`, which `Main.py` copies into
+   the multidata after generation. The server serves that embedded copy and the
+   client downloads it on connect, so the checksum mismatch against a client's
+   own empty local copy resolves itself. Verified live against `MultiServer.py`.
+
+2. **`--start 0` cannot generate.** With no game unlocked, sphere 0 is empty and
+   the fill has nowhere to place the first unlock. `--start 1` is the floor.
+   `starting_games` still accepts 0 for tests that build state by hand.
+
+3. **Spoiler levels above 1 can fail on large rosters.** Fill, accessibility and
+   the real sphere walk are all fine — with ten games on seed 1 every location is
+   reachable, every unlock is placed, and every slot's goal is satisfiable. But
+   Archipelago's `Spoiler.create_playthrough` culling stage drops event locations
+   that the goal does not strictly need, then fails to re-reach locations that do
+   need them (`Not all required items reachable`). The gate lengthens every
+   dependency chain and makes this pre-existing weakness fire. It is a spoiler-log
+   problem only; the seed itself is sound, and the default `--spoiler 0` is
+   unaffected. Small rosters (four games) produce a full spoiler 3 log fine.
