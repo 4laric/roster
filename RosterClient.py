@@ -77,7 +77,7 @@ class RosterCommandProcessor(ClientCommandProcessor):
         if not self.ctx.unlocked:
             self.output("No games unlocked yet.")
         for name in sorted(self.ctx.unlocked):
-            self.output(f"UNLOCKED: {name}")
+            self.output(f"UNLOCKED: {self.ctx.unlocked_label(name)}")
         return True
 
 
@@ -91,6 +91,7 @@ class RosterContext(CommonContext):
         self.unlocked: set[str] = set()
         self.started_slots: set[str] = set()
         self.gated_slots: set[str] = set()
+        self.slot_games: dict[str, str] = {}
 
     async def server_auth(self, password_requested: bool = False) -> None:
         if password_requested and not self.password:
@@ -99,6 +100,22 @@ class RosterContext(CommonContext):
         await self.send_connect()
 
     # ------------------------------------------------------------------ helpers
+
+    async def prepare_data_package(self, relevant_games, remote_data_package_checksums):
+        # Generic package download logs name every requested game. Roster only
+        # needs its own item/location IDs; slot_info supplies unlock reveals.
+        await super().prepare_data_package({GAME_NAME}, remote_data_package_checksums)
+
+    def unlocked_label(self, slot_name: str) -> str:
+        """Reveal the game only after this slot is actually unlocked."""
+        game = self.slot_games.get(slot_name) if slot_name in self.unlocked else None
+        return f"{slot_name} — {game}" if game and game != slot_name else slot_name
+
+    def on_print_json(self, args: dict) -> None:
+        # Generic AP join/item/hint text can identify games that are still locked.
+        # Roster renders its own unlock/started messages in on_package instead.
+        # Protocol handling (including join detection) still runs afterward.
+        pass
 
     def _started_location_ids(self) -> dict[str, int]:
         """slot name -> location id, read out of the datapackage the server handed us."""
@@ -139,10 +156,17 @@ class RosterContext(CommonContext):
 
     def on_package(self, cmd: str, args: dict) -> None:
         if cmd == "Connected":
+            self.slot_games = {}
+            for info in args.get("slot_info", {}).values():
+                name = info.get("name") if isinstance(info, dict) else getattr(info, "name", None)
+                game = info.get("game") if isinstance(info, dict) else getattr(info, "game", None)
+                if isinstance(name, str) and isinstance(game, str):
+                    self.slot_games[name] = game
+            self.slot_games.update(args.get("slot_data", {}).get("slot_games") or {})
             self.gated_slots = set(args.get("slot_data", {}).get("gated_slots", {}).values())
             for slot_name in args.get("slot_data", {}).get("starting_slots", []):
-                logger.info(f"UNLOCKED: {slot_name}  (starting game)")
                 self.unlocked.add(slot_name)
+                logger.info(f"UNLOCKED: {self.unlocked_label(slot_name)}  (starting game)")
 
         elif cmd == "ReceivedItems":
             for item in args["items"]:
@@ -152,7 +176,7 @@ class RosterContext(CommonContext):
                     if slot_name not in self.unlocked:
                         self.unlocked.add(slot_name)
                         logger.info("=" * 60)
-                        logger.info(f"UNLOCKED: {slot_name}")
+                        logger.info(f"UNLOCKED: {self.unlocked_label(slot_name)}")
                         logger.info("=" * 60)
             self._check_goal()
 

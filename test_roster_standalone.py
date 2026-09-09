@@ -5,6 +5,33 @@ from RosterStandalone import RosterStandaloneClient, parse_connection
 
 
 class ProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_game_names_revealed_only_after_unlock(self):
+        output = []
+        client = RosterStandaloneClient(output=output.append)
+        client.send_msgs = AsyncMock()
+        await client.handle_packet({
+            "cmd": "Connected", "team": 0, "slot": 3,
+            "slot_info": {
+                "1": {"name": "Game 01", "game": "Balatro"},
+                "2": {"name": "Game 02", "game": "Secret Game"},
+            },
+            "missing_locations": [101, 102],
+            "slot_data": {"starting_slots": ["Game 01"]},
+        })
+        await client.handle_packet({"cmd": "DataPackage", "data": {"games": {"Roster": {
+            "item_name_to_id": {"Unlock: Game 02": 202},
+            "location_name_to_id": {"Started: Game 01": 101, "Started: Game 02": 102},
+        }}}})
+        await client.command("/unlocked")
+        await client.command("/started nonexistent")
+        self.assertIn("UNLOCKED: Game 01 — Balatro  (starting game)", output)
+        self.assertNotIn("Secret Game", "\n".join(output))
+        await client.handle_packet({"cmd": "ReceivedItems", "index": 0, "items": [{"item": 202}]})
+        self.assertIn("UNLOCKED: Game 02 — Secret Game", output)
+        output.clear()
+        await client.command("/unlocked")
+        self.assertIn("UNLOCKED: Game 02 — Secret Game", output)
+
     async def test_tls_retry_and_disconnected_unlock_message(self):
         from websockets.exceptions import InvalidMessage
         output, attempts = [], []

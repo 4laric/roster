@@ -68,6 +68,7 @@ class RosterStandaloneClient:
         self.sent_checks = set()  # Suppress repeat sends within this connection.
         self.started_slots = set()
         self.gated_slots = set()
+        self.slot_games = {}
         self.unlocked = set()
         self.items_received = []
         self.finished_game = False
@@ -139,7 +140,11 @@ class RosterStandaloneClient:
     def _announce_unlock(self, name, starting=False):
         if name not in self.unlocked:
             self.unlocked.add(name)
-            self.output(f"UNLOCKED: {name}" + ("  (starting game)" if starting else ""))
+            self.output(f"UNLOCKED: {self.unlock_label(name)}" + ("  (starting game)" if starting else ""))
+
+    def unlock_label(self, name):
+        game = self.slot_games.get(name)
+        return f"{name} — {game}" if game and game != name and name in self.unlocked else name
 
     async def _resolve_items(self):
         for item in self.items_received:
@@ -201,6 +206,11 @@ class RosterStandaloneClient:
             self.missing_locations = set(packet.get("missing_locations", []))
             self.server_locations = self.checked_locations | self.missing_locations
             data = packet.get("slot_data") or {}
+            self.slot_games = {}
+            for info in (packet.get("slot_info") or {}).values():
+                if isinstance(info, dict) and info.get("name") and info.get("game"):
+                    self.slot_games[info["name"]] = info["game"]
+            self.slot_games.update(data.get("slot_games") or {})
             gated = data.get("gated_slots", {})
             self.gated_slots = set(gated.values() if isinstance(gated, dict) else gated)
             for name in data.get("starting_slots", []):
@@ -260,7 +270,7 @@ class RosterStandaloneClient:
             if not self.authenticated:
                 self.output("Not connected to the Roster slot. Unlocks below are cached; connect first to get current starting games.")
             for name in sorted(self.unlocked):
-                self.output(f"UNLOCKED: {name}")
+                self.output(f"UNLOCKED: {self.unlock_label(name)}")
             if not self.unlocked and self.authenticated:
                 self.output("No games unlocked yet.")
         elif command == "/connect":

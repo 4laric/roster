@@ -206,5 +206,9 @@ class RosterWorld(World):
                 str(p): self.multiworld.get_player_name(p) for p in self.gated_players
             },
             "starting_slots": [self.multiworld.get_player_name(p) for p in self.starting_players],
+            "slot_games": {
+                self.multiworld.get_player_name(p): self.multiworld.game[p]
+                for p in sorted(set(self.gated_players) | set(self.starting_players))
+            },
             "starting_games": self.options.starting_games.value,
         }

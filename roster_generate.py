@@ -3,8 +3,8 @@
 
     python roster_generate.py --games ./games --pick 10 --start 2 --seed 123
 
-Picks --pick yamls out of --games with the seed, names every slot after its game
-(truncated to Archipelago's 16 character slot limit and de-duplicated), writes a
+Picks and orders --pick yamls with the seed, assigns neutral Game 01 slot names,
+writes neutral per-slot filenames and a
 Roster.yaml next to them, and runs Archipelago's Generate.py on the lot.
 
 Prints the seed and the output path. Not the game list. The spoiler log is off by
@@ -23,7 +23,6 @@ import tempfile
 from pathlib import Path
 
 DEFAULT_ARCHIPELAGO = r"C:\Users\alari\Archipelago"
-SLOT_NAME_LIMIT = 16
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -38,23 +37,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--verbose", action="store_true", help="Print the slot name mapping and generator output.")
     parser.add_argument("--keep-players", action="store_true", help="Keep the temporary players dir.")
     return parser.parse_args(argv)
-
-
-def truncate_and_dedupe(names: list[str]) -> dict[str, str]:
-    """Map source game name -> unique slot name of at most 16 characters."""
-    used: set[str] = set()
-    mapping: dict[str, str] = {}
-    for name in names:
-        candidate = name[:SLOT_NAME_LIMIT]
-        if candidate in used:
-            for suffix in range(2, 100):
-                tag = str(suffix)
-                candidate = (name[: SLOT_NAME_LIMIT - len(tag)]) + tag
-                if candidate not in used:
-                    break
-        used.add(candidate)
-        mapping[name] = candidate
-    return mapping
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -91,7 +73,9 @@ def main(argv: list[str] | None = None) -> int:
 
     seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
     picker = random.Random(seed)
-    chosen = sorted(picker.sample(yaml_paths, args.pick), key=lambda p: p.name)
+    # sample returns a seeded random order: sorted source filenames must not
+    # determine which selected game gets Game 01, Game 02, and so on.
+    chosen = picker.sample(yaml_paths, args.pick)
 
     documents: dict[Path, dict] = {}
     for path in chosen:
@@ -108,14 +92,15 @@ def main(argv: list[str] | None = None) -> int:
             game = max(game, key=lambda key: game[key])
         return str(game) if game else path.stem
 
-    mapping = truncate_and_dedupe([game_of(documents[p], p) for p in chosen])
+    mapping = {path: f"Game {index:02d}" for index, path in enumerate(chosen, 1)}
+    filenames = {path: f"game_{index:02d}.yaml" for index, path in enumerate(chosen, 1)}
 
     players_dir = Path(tempfile.mkdtemp(prefix="roster_players_"))
     try:
         for path in chosen:
             doc = documents[path]
-            doc["name"] = mapping[game_of(doc, path)]
-            with open(players_dir / path.name, "w", encoding="utf-8") as handle:
+            doc["name"] = mapping[path]
+            with open(players_dir / filenames[path], "w", encoding="utf-8") as handle:
                 _yaml.safe_dump(doc, handle, sort_keys=False, allow_unicode=True)
 
         roster_yaml = {
@@ -134,9 +119,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.verbose:
             print("Slot name mapping:")
-            for game, slot in mapping.items():
-                marker = "" if game == slot else "  (truncated)"
-                print(f"  {game!r} -> {slot!r}{marker}")
+            for path, slot in mapping.items():
+                print(f"  {game_of(documents[path], path)!r} -> {slot!r}")
 
         outputpath = Path(args.outputpath).resolve()
         outputpath.mkdir(parents=True, exist_ok=True)
@@ -184,8 +168,8 @@ def main(argv: list[str] | None = None) -> int:
             # dynamic multiworld data is handled by RosterClient, not UT.
             tracker_dir = outputpath / f"roster_{seed}_tracker"
             tracker_dir.mkdir(exist_ok=True)
-            for index, path in enumerate(chosen, 1):
-                shutil.copy2(players_dir / path.name, tracker_dir / f"player_{index}.yaml")
+            for path in chosen:
+                shutil.copy2(players_dir / filenames[path], tracker_dir / filenames[path])
             print(f"Tracker YAMLs: {tracker_dir} (contains selected games)")
 
         print(f"Seed: {seed}")
