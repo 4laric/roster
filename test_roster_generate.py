@@ -49,6 +49,12 @@ class InstallerGeneration(unittest.TestCase):
                 self.assertNotIn("Secret Game", stdout.getvalue() + stderr.getvalue())
                 if code:
                     self.assertIn("Secret Game", (output / "roster_generate_123.log").read_text())
+                else:
+                    tracker = output / "roster_123_tracker"
+                    files = list(tracker.glob("*.yaml"))
+                    self.assertEqual(len(files), 1)
+                    self.assertEqual(yaml.safe_load(files[0].read_text())["name"], "Secret Game")
+                    self.assertFalse((tracker / "Roster.yaml").exists())
 
 
 if __name__ == "__main__":

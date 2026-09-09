@@ -106,6 +106,21 @@ also loses unacknowledged local events, so use `/started` if a join was missed.
 
 ## What is and isn't hidden
 
+### Universal Tracker YAMLs
+
+After successful generation, `output/roster_<seed>_tracker` retains the selected
+game YAMLs with the exact slot names passed to generation. These files reveal
+the selection if opened; the console does not list it. Copy the relevant game's
+YAML into Archipelago's `Players` folder, or set UT's `player_files_path` to this
+directory. Do not include the generated `Roster.yaml` in UT's input; run
+RosterClient separately for the selector slot.
+
+For an older seed, copy the original game's YAML and change only its top-level
+`name` to the generated slot name (for example `Balatro`). Keep its game options
+unchanged. UT still requires a compatible game apworld; weighted/random options
+may require the actual rolled values or game-specific UT support. This export
+does not by itself guarantee tracker compatibility.
+
 Any client's player list shows every slot and its game as soon as you connect.
 That is how Archipelago works and Roster doesn't fight it. What stays hidden is
 which game unlocks next and where its unlock sits. If your group wants the

@@ -178,6 +178,16 @@ def main(argv: list[str] | None = None) -> int:
         produced = [p for p in new if p.suffix in (".archipelago", ".zip")]
         target = produced[-1] if produced else (new[-1] if new else None)
 
+        if target:
+            # UT needs the same slot names/options, and doesn't search our
+            # temporary generator directory. Exclude the selector itself: its
+            # dynamic multiworld data is handled by RosterClient, not UT.
+            tracker_dir = outputpath / f"roster_{seed}_tracker"
+            tracker_dir.mkdir(exist_ok=True)
+            for index, path in enumerate(chosen, 1):
+                shutil.copy2(players_dir / path.name, tracker_dir / f"player_{index}.yaml")
+            print(f"Tracker YAMLs: {tracker_dir} (contains selected games)")
+
         print(f"Seed: {seed}")
         print(f"Output: {target if target else outputpath}")
         return 0 if target else 1
