@@ -257,9 +257,11 @@ class RosterStandaloneClient:
             else:
                 self.output("Usage: /started <slot name>")
         elif command == "/unlocked":
+            if not self.authenticated:
+                self.output("Not connected to the Roster slot. Unlocks below are cached; connect first to get current starting games.")
             for name in sorted(self.unlocked):
                 self.output(f"UNLOCKED: {name}")
-            if not self.unlocked:
+            if not self.unlocked and self.authenticated:
                 self.output("No games unlocked yet.")
         elif command == "/connect":
             if not argument:
@@ -277,6 +279,8 @@ class RosterStandaloneClient:
             self.output("Commands: /started <slot>, /unlocked, /connect <address>, /exit. No chat is sent.")
 
     async def run(self, websocket_connect):
+        from websockets.exceptions import InvalidMessage
+
         delay = 1
         while not self.exit_event.is_set():
             if not self.address:
@@ -302,6 +306,12 @@ class RosterStandaloneClient:
                 self.output(str(exc))
                 self.address = None
             except Exception as exc:
+                # Match CommonClient: a TLS-only AP endpoint may close a plain
+                # websocket handshake without returning a valid HTTP response.
+                if isinstance(exc, InvalidMessage) and self.address and self.address.startswith("ws://"):
+                    self.address = "wss://" + self.address[len("ws://"):]
+                    self.output("Server may require encryption; retrying with wss://.")
+                    continue
                 # Exception strings from websocket libraries can contain a URL;
                 # normalized self.address never contains login credentials.
                 self.output(f"Connection lost ({type(exc).__name__}); pending checks retained.")

@@ -93,6 +93,11 @@ console mode when `CommonClient.py` is absent; source checkouts retain the
 existing Archipelago client and optional GUI. Keep `RosterStandalone.py` beside
 `RosterClient.py` (a normal `git pull` supplies both).
 
+Connect this client as **Roster**, not as one of the selected games. It announces
+the starting games after login and automatically completes its own slot when
+every game is unlocked. For encrypted hosts you can use `/connect wss://host:port`;
+the client also retries with encryption after an invalid plain WebSocket handshake.
+
 Standalone mode supports `/started <slot>`, `/unlocked`, `/connect <address>`,
 and `/exit`. It reconnects after network interruptions and retains unacknowledged
 Started checks for replay. Run it before other players join; joining before the

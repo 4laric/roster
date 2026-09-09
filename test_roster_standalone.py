@@ -5,6 +5,37 @@ from RosterStandalone import RosterStandaloneClient, parse_connection
 
 
 class ProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tls_retry_and_disconnected_unlock_message(self):
+        from websockets.exceptions import InvalidMessage
+        output, attempts = [], []
+        client = RosterStandaloneClient("localhost:38281", output=output.append)
+        await client.command("/unlocked")
+        self.assertTrue(any("Not connected" in line for line in output))
+        self.assertNotIn("No games unlocked yet.", output)
+
+        class Connection:
+            async def __aenter__(self):
+                if len(attempts) == 1:
+                    raise InvalidMessage("TLS endpoint")
+                client.exit_event.set()
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+        def connect(address, **kwargs):
+            attempts.append(address)
+            return Connection()
+
+        await client.run(connect)
+        self.assertEqual(attempts, ["ws://localhost:38281", "wss://localhost:38281"])
+
     async def make_client(self):
         output = []
         client = RosterStandaloneClient(name="Roster", output=output.append)
