@@ -31,6 +31,12 @@ Existing worlds are preserved by the install button. Source world copies update
 with `git pull`; move an old `roster.apworld` out of `custom_worlds` before installing
 its replacement. This does not modify an already generated room.
 
+Roster world **0.1.1** fixes compatibility with Ship of Harkinian's shuffled
+shops. Gates are applied after game-local prefill, before the main multiworld
+fill, so shop placement can finish and the game's final goal remains gated.
+Installer users must replace their `custom_worlds/roster.apworld` to receive
+this fix; updating only the launcher is insufficient.
+
 Only starting games are shown after generation. Full generator diagnostics,
 tracker YAML contents, and AP's web pages may reveal other games.
 

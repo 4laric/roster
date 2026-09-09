@@ -179,8 +179,14 @@ class RosterWorld(World):
         )
 
     @classmethod
-    def stage_generate_basic(cls, multiworld: MultiWorld) -> None:
-        """Wrap every gated slot's location rules and completion condition with its unlock."""
+    def stage_pre_fill(cls, multiworld: MultiWorld) -> None:
+        """Apply gates after game-local prefill, before the multiworld fill.
+
+        Games such as SoH prefill shops using a local-only inventory, without
+        cross-game unlocks. They may also replace their completion condition.
+        Waiting for all per-world pre_fill calls preserves their local setup
+        and wraps the final rules used for multiworld placement and validation.
+        """
         for roster_player in multiworld.player_ids:
             world = multiworld.worlds[roster_player]
             if world.game != GAME_NAME:

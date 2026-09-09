@@ -20,6 +20,31 @@ def make_multiworld(starting_games: int = 0, seed: int = 1):
 
 
 class TestRosterGate(unittest.TestCase):
+    def test_local_prefill_runs_before_gate_and_goal_reset_is_wrapped(self) -> None:
+        from unittest.mock import patch
+        other = AutoWorldRegister.world_types[OTHER_GAME]
+        visited = []
+
+        def local_prefill(world):
+            # Like SoH, prepare a local-only inventory and replace the goal.
+            state = CollectionState(world.multiworld)
+            for item in world.multiworld.itempool:
+                if item.player == world.player:
+                    state.collect(item, prevent_sweep=True)
+            state.sweep_for_advancements(world.multiworld.get_locations(world.player))
+            self.assertTrue(any(location.can_reach(state)
+                                for location in world.multiworld.get_locations(world.player)))
+            world.multiworld.completion_condition[world.player] = lambda state: True
+            visited.append(world.player)
+
+        with patch.object(other, 'pre_fill', local_prefill):
+            multiworld = make_multiworld(starting_games=0)
+        self.assertEqual(visited, [2, 3])
+        state = CollectionState(multiworld)
+        for player in visited:
+            self.assertFalse(multiworld.completion_condition[player](state))
+            self.assertTrue(all(not loc.can_reach(state) for loc in multiworld.get_locations(player)))
+
     def test_own_unlock_cannot_fill_own_started(self) -> None:
         multiworld = make_multiworld(starting_games=0)
         roster = multiworld.worlds[1]
