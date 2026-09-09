@@ -14,6 +14,8 @@ default because it lists every selected game.
 from __future__ import annotations
 
 import argparse
+import json
+import uuid
 import os
 import random
 import shutil
@@ -21,6 +23,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from RosterSeed import read_starting_games
 
 DEFAULT_ARCHIPELAGO = r"C:\Users\alari\Archipelago"
 
@@ -36,11 +40,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--archipelago", default=DEFAULT_ARCHIPELAGO, help="Path to an Archipelago source checkout or installed distribution.")
     parser.add_argument("--verbose", action="store_true", help="Print the slot name mapping and generator output.")
     parser.add_argument("--keep-players", action="store_true", help="Keep the temporary players dir.")
-    return parser.parse_args(argv)
+    parser.add_argument("--result-file", help="Write success JSON for the launcher.")
+    args = parser.parse_args(argv)
+    if args.pick < 1 or not 1 <= args.start <= args.pick:
+        parser.error("Require --pick >= 1 and 1 <= --start <= --pick")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    result_path = Path(args.result_file).resolve() if args.result_file else None
+    if result_path:
+        result_path.unlink(missing_ok=True)
 
     ap_path = Path(args.archipelago).resolve()
     source_install = (ap_path / "Generate.py").is_file()
@@ -63,7 +75,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     games_dir = Path(args.games).resolve()
-    yaml_paths = sorted(p for p in games_dir.iterdir() if p.suffix.lower() in (".yaml", ".yml"))
+    if not games_dir.is_dir():
+        print("The games folder does not exist.", file=sys.stderr)
+        return 2
+    yaml_paths = sorted(p for p in games_dir.iterdir() if p.is_file() and p.suffix.lower() in (".yaml", ".yml"))
     if not yaml_paths:
         print(f"No yamls in {games_dir}", file=sys.stderr)
         return 2
@@ -79,10 +94,14 @@ def main(argv: list[str] | None = None) -> int:
 
     documents: dict[Path, dict] = {}
     for path in chosen:
-        with open(path, encoding="utf-8") as handle:
-            doc = _yaml.safe_load(handle)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                doc = _yaml.safe_load(handle)
+        except (OSError, _yaml.YAMLError):
+            print("A selected player YAML could not be read.", file=sys.stderr)
+            return 2
         if not isinstance(doc, dict):
-            print(f"{path.name} is not a single-document player yaml", file=sys.stderr)
+            print("A selected player YAML is not a single-document mapping.", file=sys.stderr)
             return 2
         documents[path] = doc
 
@@ -96,6 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     filenames = {path: f"game_{index:02d}.yaml" for index, path in enumerate(chosen, 1)}
 
     players_dir = Path(tempfile.mkdtemp(prefix="roster_players_"))
+    staging_dir = None
     try:
         for path in chosen:
             doc = documents[path]
@@ -124,11 +144,13 @@ def main(argv: list[str] | None = None) -> int:
 
         outputpath = Path(args.outputpath).resolve()
         outputpath.mkdir(parents=True, exist_ok=True)
-        start_time = __import__("time").time() - 1
+        # A private output directory makes freshness unambiguous even when a
+        # same-seed archive already exists with a recent/coarse timestamp.
+        staging_dir = Path(tempfile.mkdtemp(prefix=".roster_generation_", dir=outputpath))
 
         gen_argv = [
             "--player_files_path", str(players_dir),
-            "--outputpath", str(outputpath),
+            "--outputpath", str(staging_dir),
             "--seed", str(seed),
             "--spoiler", str(args.spoiler),
             "--multi", "0",
@@ -157,25 +179,49 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             os.chdir(cwd)
 
-        new = [p for p in outputpath.iterdir() if p.stat().st_mtime >= start_time]
-        new.sort(key=lambda p: p.stat().st_mtime)
-        produced = [p for p in new if p.suffix in (".archipelago", ".zip")]
-        target = produced[-1] if produced else (new[-1] if new else None)
+        produced = [p for p in staging_dir.iterdir() if p.is_file() and p.suffix.lower() in (".archipelago", ".zip")]
+        if len(produced) != 1:
+            print("Generation did not produce one fresh seed archive.", file=sys.stderr)
+            return 1
+        generated = produced[0]
+        starting_games = read_starting_games(generated) if result_path else None
+        target = outputpath / generated.name
+        if target.exists():
+            target = outputpath / f"{generated.stem}_{uuid.uuid4().hex[:8]}{generated.suffix}"
+        generated.replace(target)
 
         if target:
             # UT needs the same slot names/options, and doesn't search our
             # temporary generator directory. Exclude the selector itself: its
             # dynamic multiworld data is handled by RosterClient, not UT.
             tracker_dir = outputpath / f"roster_{seed}_tracker"
-            tracker_dir.mkdir(exist_ok=True)
+            if tracker_dir.exists():
+                tracker_dir = Path(tempfile.mkdtemp(prefix=f"roster_{seed}_tracker_", dir=outputpath))
+            else:
+                tracker_dir.mkdir()
             for path in chosen:
                 shutil.copy2(players_dir / filenames[path], tracker_dir / filenames[path])
             print(f"Tracker YAMLs: {tracker_dir} (contains selected games)")
 
+        if result_path:
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_result = result_path.with_name(result_path.name + ".tmp-" + uuid.uuid4().hex)
+            temporary_result.write_text(json.dumps({"output": str(target.resolve()),
+                                                    "tracker_dir": str(tracker_dir.resolve()),
+                                                    "starting_games": starting_games}), encoding="utf-8")
+            temporary_result.replace(result_path)
         print(f"Seed: {seed}")
         print(f"Output: {target if target else outputpath}")
         return 0 if target else 1
+    except (Exception, SystemExit):
+        if args.verbose:
+            raise
+        print("Generation failed; no starting games were revealed. Use --verbose only if spoilers are acceptable.",
+              file=sys.stderr)
+        return 1
     finally:
+        if staging_dir:
+            shutil.rmtree(staging_dir, ignore_errors=True)
         if args.keep_players:
             print(f"Players dir: {players_dir}")
         else:
@@ -196,11 +242,20 @@ def run_source_generation(gen_argv: list[str], verbose: bool) -> None:
         import contextlib
         import io
 
-        logging.getLogger().setLevel(logging.ERROR)
         sink = io.StringIO()
-        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-            gen_args, gen_seed = Generate.main(Generate.mystery_argparse(gen_argv))
-            run_generation(gen_args, gen_seed)
+        logger = logging.getLogger()
+        handlers, level = logger.handlers[:], logger.level
+        # Existing logging handlers retain their original stderr stream, so
+        # redirect_stderr alone does not prevent hidden-game error disclosure.
+        logger.handlers = [logging.StreamHandler(sink)]
+        logger.setLevel(logging.ERROR)
+        try:
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                gen_args, gen_seed = Generate.main(Generate.mystery_argparse(gen_argv))
+                run_generation(gen_args, gen_seed)
+        finally:
+            logger.handlers = handlers
+            logger.setLevel(level)
 
 
 if __name__ == "__main__":

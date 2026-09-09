@@ -4,7 +4,7 @@ from BaseClasses import CollectionState, ItemClassification
 from test.general import setup_multiworld
 from worlds.AutoWorld import AutoWorldRegister
 
-from .. import GAME_NAME, unlock_name
+from .. import GAME_NAME, unlock_name, started_name
 
 OTHER_GAME = "APQuest"
 
@@ -20,6 +20,48 @@ def make_multiworld(starting_games: int = 0, seed: int = 1):
 
 
 class TestRosterGate(unittest.TestCase):
+    def test_own_unlock_cannot_fill_own_started(self) -> None:
+        multiworld = make_multiworld(starting_games=0)
+        roster = multiworld.worlds[1]
+        for player in (2, 3):
+            name = multiworld.get_player_name(player)
+            state = CollectionState(multiworld)
+            for item in multiworld.itempool:
+                if item.name != unlock_name(name):
+                    state.collect(item, prevent_sweep=True)
+            own_unlock = roster.create_item(unlock_name(name))
+            started = roster.get_location(started_name(name))
+            self.assertFalse(started.can_reach(state))
+            self.assertFalse(started.can_fill(state, own_unlock, check_access=True))
+
+    def test_real_restrictive_fill_has_no_circular_unlocks(self) -> None:
+        from Fill import distribute_items_restrictive
+        for seed in range(10):
+            with self.subTest(seed=seed):
+                multiworld = make_multiworld(starting_games=1, seed=seed)
+                distribute_items_restrictive(multiworld)
+                self.assertTrue(multiworld.can_beat_game())
+                for location in multiworld.get_locations(1):
+                    self.assertNotEqual(location.item.name,
+                                        location.name.replace("Started: ", "Unlock: "))
+
+    def test_tracker_bridge_preserves_rules_and_closes_checks(self) -> None:
+        from RosterTracker import TrackerGate
+        multiworld = make_multiworld(starting_games=1)
+        gate = TrackerGate()
+        for player in (2, 3):
+            gate.apply(multiworld, player)
+            gate.apply(multiworld, player)  # Repeat refresh must not stack wrappers.
+        state = multiworld.get_all_state(False)
+        self.assertTrue(all(not loc.can_reach(state) for p in (2, 3)
+                            for loc in multiworld.get_locations(p)))
+        gate.allowed = True
+        state = multiworld.get_all_state(False)  # UT rebuilds CollectionState on every refresh.
+        self.assertTrue(all(loc.can_reach(state) for p in (2, 3)
+                           for loc in multiworld.get_locations(p)))
+        gate.allowed = False
+        self.assertTrue(all(not multiworld.completion_condition[p](state) for p in (2, 3)))
+
     def test_gated_slots_unreachable_from_empty_state(self) -> None:
         multiworld = make_multiworld(starting_games=0)
         state = CollectionState(multiworld)

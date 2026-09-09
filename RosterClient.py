@@ -59,6 +59,15 @@ from CommonClient import (  # noqa: E402
 )
 from NetUtils import ClientStatus  # noqa: E402
 
+def is_game_join(packet: dict) -> bool:
+    """Only AP game clients count; companion tools often also carry the AP tag."""
+    tags = packet.get("tags", [])
+    if not isinstance(tags, (list, tuple, set)):
+        return False
+    tags = {tag.casefold() for tag in tags if isinstance(tag, str)}
+    return "ap" in tags and not tags.intersection({"tracker", "poptracker", "textonly", "hintgame"})
+
+
 GAME_NAME = "Roster"
 UNLOCK_PREFIX = "Unlock: "
 STARTED_PREFIX = "Started: "
@@ -127,6 +136,10 @@ class RosterContext(CommonContext):
         return mapping
 
     def mark_started(self, slot_name: str, manual: bool = False) -> bool:
+        if slot_name not in self.unlocked:
+            if manual:
+                logger.info(f"{slot_name} is locked; unlock it before marking it started.")
+            return False
         if slot_name in self.started_slots:
             return True
         mapping = self._started_location_ids()
@@ -136,6 +149,8 @@ class RosterContext(CommonContext):
                 logger.info(f"No 'Started: {slot_name}' check exists. Known: {sorted(mapping)}")
             return False
         self.started_slots.add(slot_name)
+        # CommonClient replays this local set on Connected after a socket drop.
+        self.locations_checked.add(location_id)
         logger.info(f"Started: {slot_name}")
         Utils.async_start(self.check_locations([location_id]), name="roster started check")
         return True
@@ -181,10 +196,11 @@ class RosterContext(CommonContext):
             self._check_goal()
 
         elif cmd == "PrintJSON":
-            if args.get("type") in ("Join", "Connect"):
+            if args.get("type") in ("Join", "Connect") and is_game_join(args) and args.get("team", self.team) == self.team:
                 slot = args.get("slot")
                 if slot is not None:
-                    slot_name = self.player_names.get(slot)
+                    info = self.slot_info.get(slot)
+                    slot_name = (info.get("name") if isinstance(info, dict) else getattr(info, "name", None)) or self.player_names.get(slot)
                     if slot_name and slot_name != self.auth:
                         self.mark_started(slot_name)
 

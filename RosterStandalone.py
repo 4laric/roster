@@ -8,11 +8,24 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+from pathlib import Path
+import tempfile
+import time
 import queue
 import sys
 import threading
 import uuid
 from urllib.parse import unquote, urlsplit, urlunsplit
+
+def is_game_join(packet: dict) -> bool:
+    """Only AP game clients count; companion tools often also carry the AP tag."""
+    tags = packet.get("tags", [])
+    if not isinstance(tags, (list, tuple, set)):
+        return False
+    tags = {tag.casefold() for tag in tags if isinstance(tag, str)}
+    return "ap" in tags and not tags.intersection({"tracker", "poptracker", "textonly", "hintgame"})
+
 
 GAME_NAME = "Roster"
 STARTED_PREFIX = "Started: "
@@ -45,12 +58,15 @@ class DifferentSeedError(RuntimeError):
 
 
 class RosterStandaloneClient:
-    def __init__(self, address=None, name="Roster", password=None, output=print):
+    def __init__(self, address=None, name="Roster", password=None, output=print, state_file=None, state_callback=None):
         self.address = None
         self.name, self.password = name, password
         if address:
             self.address, self.name, self.password = parse_connection(address, name, password)
         self.output = output
+        self.state_file = Path(state_file) if state_file else None
+        self.state_callback = state_callback
+        self._state_error = None
         self.socket = None
         self.authenticated = False
         self.team = self.slot = None
@@ -76,6 +92,40 @@ class RosterStandaloneClient:
         self.sync_requested = False
         self.exit_event = asyncio.Event()
         self.reconnect_event = asyncio.Event()
+        self.publish_state()
+
+    def publish_state(self):
+        """Atomic, credential-free bridge snapshot; never includes locked identities."""
+        state = {"version": 1, "seed_name": self.seed_name,
+                 "connected": bool(self.authenticated), "unlocked": sorted(self.unlocked),
+                 "updated_at": time.time()}
+        if self.state_callback is not None:
+            self.state_callback(state)
+        if self.state_file is None:
+            return state
+        temporary = None
+        try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.state_file.parent,
+                                             prefix=self.state_file.name + ".", suffix=".tmp", delete=False) as handle:
+                temporary = handle.name
+                json.dump(state, handle, ensure_ascii=True)
+                handle.write("\n")
+            os.replace(temporary, self.state_file)
+            self._state_error = None
+        except OSError as exc:
+            # Consumers expire the last valid snapshot instead of accepting a
+            # partially written file. Log only once per persistent failure.
+            if self._state_error != type(exc).__name__:
+                self.output(f"Unable to publish tracker state ({type(exc).__name__}); bridge will expire stale state.")
+            self._state_error = type(exc).__name__
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+        return state
 
     async def send_msgs(self, messages):
         if self.socket is not None:
@@ -100,6 +150,10 @@ class RosterStandaloneClient:
                 if name.startswith(STARTED_PREFIX) and location in self.server_locations}
 
     async def mark_started(self, slot_name, manual=False):
+        if slot_name not in self.unlocked:
+            if manual:
+                self.output(f"{slot_name} is locked; unlock it before marking it started.")
+            return False
         mapping = self._started_location_ids()
         if slot_name not in mapping:
             if manual:
@@ -134,12 +188,14 @@ class RosterStandaloneClient:
                 self.pending_joins.discard((team, slot))
                 continue
             name = self.player_names.get(slot)
-            if name and await self.mark_started(name):
+            if name and name in self._started_location_ids():
+                await self.mark_started(name)
                 self.pending_joins.discard((team, slot))
 
     def _announce_unlock(self, name, starting=False):
         if name not in self.unlocked:
             self.unlocked.add(name)
+            self.publish_state()
             self.output(f"UNLOCKED: {self.unlock_label(name)}" + ("  (starting game)" if starting else ""))
 
     def unlock_label(self, name):
@@ -215,6 +271,7 @@ class RosterStandaloneClient:
             self.gated_slots = set(gated.values() if isinstance(gated, dict) else gated)
             for name in data.get("starting_slots", []):
                 self._announce_unlock(name, starting=True)
+            self.publish_state()
             self.output(f"Connected as {self.name} (team {self.team + 1}, slot {self.slot}).")
             # The full player roster is not proof that any other client joined.
             await self._resolve_joins()
@@ -236,7 +293,7 @@ class RosterStandaloneClient:
                     self.sync_requested = True
                 return
             await self._resolve_items()
-        elif cmd == "PrintJSON" and packet.get("type") in ("Join", "Connect"):
+        elif cmd == "PrintJSON" and packet.get("type") in ("Join", "Connect") and is_game_join(packet):
             slot = packet.get("slot")
             team = packet.get("team", self.team)
             if isinstance(slot, int) and isinstance(team, int):
@@ -328,6 +385,7 @@ class RosterStandaloneClient:
             finally:
                 self.socket = None
                 self.authenticated = False
+                self.publish_state()
                 self.sent_checks.clear()
             if self.exit_event.is_set():
                 break
@@ -341,7 +399,7 @@ class RosterStandaloneClient:
 
 
 async def _main(args, websocket_connect):
-    client = RosterStandaloneClient(args.connect or args.url, args.name, args.password)
+    client = RosterStandaloneClient(args.connect or args.url, args.name, args.password, state_file=args.state_file)
     commands = queue.Queue()
 
     def read_console():
@@ -353,14 +411,20 @@ async def _main(args, websocket_connect):
     client.output("Roster client. Commands: /started <slot>, /unlocked, /connect <address>, /exit")
     if not client.address:
         client.output("Use /connect host:port to connect.")
+    next_publish = time.monotonic() + 5
     try:
         while not client.exit_event.is_set():
+            if time.monotonic() >= next_publish:
+                client.publish_state()
+                next_publish = time.monotonic() + 5
             while not commands.empty():
                 await client.command(commands.get_nowait())
             await asyncio.sleep(0.1)
     finally:
         network.cancel()
         await asyncio.gather(network, return_exceptions=True)
+        client.authenticated = False
+        client.publish_state()
 
 
 def main(argv=None):
@@ -368,6 +432,7 @@ def main(argv=None):
     parser.add_argument("--name", default="Roster")
     parser.add_argument("--connect")
     parser.add_argument("--password")
+    parser.add_argument("--state-file", help="Atomically publish a versioned tracker bridge snapshot")
     parser.add_argument("--archipelago", help="Accepted for launcher compatibility; not used")
     parser.add_argument("--nogui", action="store_true", help="Accepted; this client is console-only")
     parser.add_argument("url", nargs="?")

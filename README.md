@@ -11,6 +11,47 @@ for example **Game 01 — Balatro**, and you get to play it. The seed is done wh
 Nothing here touches Archipelago itself. It is one apworld, a script that wraps
 generation, and a small client.
 
+## Launcher
+
+On Windows, extract the portable `Roster-Windows.zip` and open
+`RosterLauncher.exe`. It includes Python and its dependencies; Archipelago and
+each candidate game's apworld still need to be installed separately.
+
+From a clone, install `PyYAML` and `websockets` into your Python environment,
+then double-click `StartRoster.cmd` or run `python RosterLauncher.py`.
+
+1. Browse to your Archipelago installation and your folder of candidate YAMLs.
+2. Click **Install Roster world** if Roster is not already installed.
+3. Choose how many games to pick and how many start unlocked, then **Generate seed**.
+4. The launcher displays the actual starting games and the generated ZIP path.
+   Upload that ZIP with **Host on Archipelago**. Keep the local ZIP for recovery.
+5. Enter the hosted room address and click **Start Roster client**. Leave it open.
+
+Existing worlds are preserved by the install button. Source world copies update
+with `git pull`; move an old `roster.apworld` out of `custom_worlds` before installing
+its replacement. This does not modify an already generated room.
+
+Only starting games are shown after generation. Full generator diagnostics,
+tracker YAML contents, and AP's web pages may reveal other games.
+
+To build the portable ZIP yourself: install `PyInstaller`, `PyYAML`, and
+`websockets`, then run `python build_launcher.py`. The bundle is written to
+`output/Roster-Windows.zip`. The EXE generates with the Windows Archipelago
+installer; use the Python launcher for Archipelago source checkouts.
+
+## Roster-aware Universal Tracker
+
+Stock Universal Tracker reconstructs each game independently and does not apply
+Roster's cross-game lock. Its green checks are therefore not proof that a locked
+game is reachable in the generated multiworld.
+
+The optional [source tracker bridge](docs/tracker-bridge.md) gates the actual
+tracker rules using the Roster client's current unlock state. Missing, stale,
+disconnected, or wrong-seed state keeps the tracked game locked. Use **Start
+gated tracker (source only)** in the Python launcher after configuring a source
+checkout with Universal Tracker. The stock installer tracker cannot load this
+bridge; the portable EXE does not claim to gate it.
+
 ## What you need
 
 - An **Archipelago source checkout or Windows installation**, plus Python 3.12
@@ -75,7 +116,7 @@ The generated seed contains one neutral slot per selected game (`Game 01`,
 
        python RosterClient.py --archipelago C:\path\to\Archipelago
 
-   It marks a game as started the first time anyone joins its slot, prints a
+   It marks an unlocked game as started when a game client joins its slot, prints a
    line such as `Game 01 — Balatro` whenever an unlock arrives, and has `/started <slot>`
    as a manual fallback and `/unlocked` to list what's open.
 3. A game is locked until its unlock item is found. Playing it early isn't
@@ -108,6 +149,9 @@ and `/exit`. It reconnects after network interruptions and retains unacknowledge
 Started checks for replay. Run it before other players join; joining before the
 Roster client connects needs the manual `/started` fallback. A full client restart
 also loses unacknowledged local events, so use `/started` if a join was missed.
+Tracker, text-only, and hint-client connections do not send Started checks.
+Both automatic starts and `/started` require the slot to be unlocked. A client
+that joined while locked must reconnect after the unlock or use `/started`.
 
 ## What is and isn't hidden
 

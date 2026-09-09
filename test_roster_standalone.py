@@ -93,7 +93,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         packets = [p for call in client.send_msgs.call_args_list for p in call.args[0]]
         self.assertIn({"cmd": "StatusUpdate", "status": 30}, packets)
         client.send_msgs.reset_mock()
-        join = {"cmd": "PrintJSON", "type": "Join", "team": 0, "slot": 2}
+        join = {"cmd": "PrintJSON", "type": "Join", "team": 0, "slot": 2, "tags": ["AP"]}
         await client.handle_packet(dict(join, team=1))
         self.assertFalse(client.started_slots)
         await client.handle_packet(join)
@@ -102,6 +102,60 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         checks = [p for p in packets if p["cmd"] == "LocationChecks"]
         self.assertEqual(checks, [{"cmd": "LocationChecks", "locations": [100]}])
         self.assertTrue(any("UNLOCKED: Game A" in line for line in output))
+
+    async def test_tools_and_locked_slots_never_start_checks(self):
+        client, output = await self.make_client()
+        await client.handle_packet({"cmd": "DataPackage", "data": {"games": {"Roster": {
+            "item_name_to_id": {"Unlock: Game A": 200},
+            "location_name_to_id": {"Started: Game A": 100},
+        }}}})
+        join = {"cmd": "PrintJSON", "type": "Join", "team": 0, "slot": 2, "tags": ["AP"]}
+        await client.handle_packet(join)
+        self.assertFalse(await client.mark_started("Game A", manual=True))
+        self.assertFalse(client.started_slots)
+        await client.handle_packet({"cmd": "ReceivedItems", "index": 0, "items": [{"item": 200}]})
+        client.send_msgs.reset_mock()
+        for tags in (["AP", "Tracker"], ["AP", "TextOnly"], ["AP", "HintGame"], ["PopTracker"], [], ["Tracker"]):
+            await client.handle_packet(dict(join, tags=tags))
+        self.assertFalse(client.started_slots)
+        client.send_msgs.assert_not_called()
+        await client.handle_packet(join)
+        client.send_msgs.assert_awaited_once_with([{"cmd": "LocationChecks", "locations": [100]}])
+        await client.handle_packet(join)
+        self.assertEqual(client.send_msgs.await_count, 1)
+
+    async def test_atomic_bridge_snapshot_never_reveals_locked_names(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "state.json"
+            snapshots = []
+            client = RosterStandaloneClient(state_file=path, state_callback=snapshots.append, output=lambda line: None)
+            client.send_msgs = AsyncMock()
+            self.assertFalse(json.loads(path.read_text())["connected"])
+            client.seed_name = "seed-123"
+            await client.handle_packet({"cmd": "Connected", "team": 0, "slot": 1,
+                "missing_locations": [], "slot_data": {"starting_slots": ["Game 01"],
+                "slot_games": {"Game 01": "Known Game", "Game 02": "Secret Game"}}})
+            data = json.loads(path.read_text())
+            self.assertEqual(data["version"], 1)
+            self.assertEqual(data["seed_name"], "seed-123")
+            self.assertTrue(data["connected"])
+            self.assertEqual(data["unlocked"], ["Game 01"])
+            self.assertNotIn("Secret Game", path.read_text())
+            self.assertNotIn("Game 02", path.read_text())
+            self.assertIsInstance(data["updated_at"], (int, float))
+            previous = path.read_bytes()
+            with patch("RosterStandalone.os.replace", side_effect=PermissionError):
+                client.publish_state()
+            self.assertEqual(path.read_bytes(), previous)
+            self.assertEqual(list(Path(folder).glob("*.tmp")), [])
+            client.authenticated = False
+            client.publish_state()
+            self.assertFalse(json.loads(path.read_text())["connected"])
+            self.assertFalse(snapshots[-1]["connected"])
 
     def test_connection_addresses(self):
         url, name, password = parse_connection("localhost:38281", "Roster", None)
@@ -120,6 +174,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         await client.handle_packet(gap)
         await client.handle_packet(gap)
         client.send_msgs.assert_awaited_once_with([{"cmd": "Sync"}])
+        await client.handle_packet({"cmd": "ReceivedItems", "index": 0, "items": [{"item": 200}]})
         await client.mark_started("Game A")
         self.assertEqual(client.pending_checks, {"Game A"})
         client.sent_checks.clear()  # Simulate a dropped connection before acknowledgment.
