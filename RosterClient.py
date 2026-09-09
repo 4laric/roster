@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 DEFAULT_ARCHIPELAGO = os.environ.get("ARCHIPELAGO_PATH", r"C:\Users\alari\Archipelago")
 
@@ -39,6 +40,12 @@ def _pre_parse_archipelago(argv: list[str]) -> tuple[str, list[str]]:
 
 
 ARCHIPELAGO_PATH, _REST_ARGV = _pre_parse_archipelago(sys.argv[1:])
+if not Path(ARCHIPELAGO_PATH, "CommonClient.py").is_file():
+    # Installer distributions contain frozen modules, not importable source.
+    # Use our small protocol client rather than loading incompatible bytecode.
+    from RosterStandalone import main as standalone_main
+
+    raise SystemExit(standalone_main(_REST_ARGV))
 _bootstrap(ARCHIPELAGO_PATH)
 
 import Utils  # noqa: E402

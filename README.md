@@ -43,8 +43,8 @@ python roster_generate.py --games ./games --pick 10 --start 2 --archipelago "D:\
 
 The wrapper needs Python and PyYAML; the installer runs generation with its own
 bundled runtime. Install the Roster world and each selected game's world into
-that Archipelago installation first. This support is for generation only; it
-does not change `RosterClient.py`'s runtime requirements.
+that Archipelago installation first. The client also supports installer-only
+setups through a standalone console mode, described below.
 On failure, non-verbose generator output is saved to an output-directory log
 instead of revealing selected games in the console.
 
@@ -76,6 +76,28 @@ plus one slot called `Roster`.
 3. A game is locked until its unlock item is found. Playing it early isn't
    prevented by anything but honour: the server will accept the checks.
 4. The seed is done when every game slot has reached its goal.
+
+### Client with an installed Archipelago distribution
+
+You do not need a source checkout for the Roster client. Install its standalone
+network dependency into the Python environment used to launch it:
+
+```powershell
+python -m pip install websockets
+python RosterClient.py --archipelago "D:\Archipelago" --name Roster --connect "archipelago.gg:38281"
+```
+
+Replace the address with your hosted room's address. Without `--connect`, use
+`/connect host:port` in the console. The wrapper automatically selects standalone
+console mode when `CommonClient.py` is absent; source checkouts retain the
+existing Archipelago client and optional GUI. Keep `RosterStandalone.py` beside
+`RosterClient.py` (a normal `git pull` supplies both).
+
+Standalone mode supports `/started <slot>`, `/unlocked`, `/connect <address>`,
+and `/exit`. It reconnects after network interruptions and retains unacknowledged
+Started checks for replay. Run it before other players join; joining before the
+Roster client connects needs the manual `/started` fallback. A full client restart
+also loses unacknowledged local events, so use `/started` if a join was missed.
 
 ## What is and isn't hidden
 
