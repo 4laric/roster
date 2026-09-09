@@ -9,10 +9,47 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import uuid
 import zipfile
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
 RESOURCE_DIR = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+
+
+class GenerationJob:
+    """Own exactly one worker process and cancel its child tree on Windows."""
+    def __init__(self):
+        self.process = None
+        self.cancelled = threading.Event()
+        self.lock = threading.Lock()
+
+    def run(self, command, worker_log):
+        with open(worker_log, 'w', encoding='utf-8', buffering=1) as log:
+            log.write('Roster generation worker started. Diagnostics may contain selected games.\n')
+            with self.lock:
+                if self.cancelled.is_set():
+                    return 125
+                self.process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                                stdin=subprocess.DEVNULL,
+                                                env={**os.environ, 'PYTHONUNBUFFERED': '1'},
+                                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            return self.process.wait()
+
+    def cancel(self):
+        self.cancelled.set()
+        with self.lock:
+            process = self.process
+            if process is None or process.poll() is not None:
+                return
+            if sys.platform == 'win32':
+                result = subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), timeout=15)
+                if result.returncode and process.poll() is None:
+                    raise RuntimeError('Windows could not stop the generation process tree. Try Cancel again.')
+            else:
+                process.terminate()
 
 
 def worker_command(mode, args):
@@ -55,6 +92,10 @@ class Launcher:
         from tkinter import ttk
         self.root, self.events = root, queue.Queue()
         self.busy = False
+        self.job = None
+        self.log_path = None
+        self.started_at = 0
+        self.cancel_error = None
         self.result = None
         root.title('Roster')
         root.geometry('800x790')
@@ -89,6 +130,12 @@ class Launcher:
             self.inputs.append(entry)
         self.generate_button = ttk.Button(frame, text='Generate seed', command=self.generate)
         self.generate_button.pack(anchor='w', pady=8)
+        progress = ttk.Frame(frame)
+        progress.pack(fill='x')
+        self.cancel_button = ttk.Button(progress, text='Cancel generation', state='disabled', command=self.cancel_generation)
+        self.cancel_button.pack(side='left')
+        self.log_button = ttk.Button(progress, text='Show diagnostic logs', state='disabled', command=self.show_logs)
+        self.log_button.pack(side='left', padx=8)
         self.status = tk.StringVar(value='Ready. Selected game names stay hidden until unlocked.')
         ttk.Label(frame, textvariable=self.status, wraplength=730).pack(anchor='w', pady=(4, 8))
         self.reveal = tk.Text(frame, height=8, wrap='word', font=('Segoe UI', 10), state='disabled')
@@ -138,6 +185,7 @@ class Launcher:
         self.busy = busy
         for widget in [self.generate_button, self.install_button, *self.inputs]:
             widget.configure(state='disabled' if busy else 'normal')
+        self.cancel_button.configure(state='normal' if busy else 'disabled')
 
     def generate(self):
         from tkinter import messagebox
@@ -159,19 +207,34 @@ class Launcher:
             args = ['--archipelago', str(ap), '--games', str(games), '--pick', str(pick), '--start', str(start), '--outputpath', str(Path(self.output.get()).resolve())]
             if self.seed.get().strip():
                 args += ['--seed', str(int(self.seed.get()))]
+            output_dir = Path(self.output.get()).resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
+            run_id = time.strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:6]
+            log_path = output_dir / f'roster_generate_{run_id}.log'
+            worker_log = output_dir / f'roster_worker_{run_id}.log'
+            log_path.write_text('Waiting for generator startup. This log may reveal selected games.\n', encoding='utf-8')
+            args += ['--log-file', str(log_path)]
         except (ValueError, OSError) as exc:
             messagebox.showerror('Check generation settings', str(exc))
             return
         self.set_busy(True)
+        self.job = job = GenerationJob()
+        self.cancel_error = None
+        self.log_path = log_path
+        self.worker_log = worker_log
+        self.started_at = time.monotonic()
+        self.log_button.configure(state='normal')
         self.status.set('Generating… This can take several minutes. Game names remain hidden.')
         self.set_reveal('')
         def run():
             with tempfile.TemporaryDirectory(prefix='roster-launcher-') as temp:
                 result_file = Path(temp) / 'result.json'
                 try:
-                    process = subprocess.run(worker_command('--generate-worker', [*args, '--result-file', str(result_file)]), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-                    if process.returncode:
-                        self.events.put(('failure', process.stdout))
+                    code = job.run(worker_command('--generate-worker', [*args, '--result-file', str(result_file)]), worker_log)
+                    if job.cancelled.is_set():
+                        self.events.put(('cancelled', None))
+                    elif code:
+                        self.events.put(('failure', f'Worker exited with code {code}. See {log_path} and {worker_log}.'))
                     else:
                         self.events.put(('success', json.loads(result_file.read_text(encoding='utf-8'))))
                 except Exception as exc:
@@ -179,8 +242,25 @@ class Launcher:
         threading.Thread(target=run, daemon=True).start()
 
     def poll(self):
+        if self.busy:
+            elapsed = int(time.monotonic() - self.started_at)
+            updates = []
+            for path in (self.log_path, self.worker_log):
+                try:
+                    updates.append(path.stat().st_mtime)
+                except (OSError, AttributeError):
+                    pass
+            latest = max(updates, default=time.time())
+            idle = max(0, int(time.time() - latest))
+            phase = 'Cancelling' if self.job and self.job.cancelled.is_set() else 'Generating'
+            self.status.set(self.cancel_error or f'{phase} — {elapsed // 60}:{elapsed % 60:02d} elapsed. Last log activity {idle}s ago. Logs: {self.log_path}')
         while not self.events.empty():
             kind, payload = self.events.get_nowait()
+            if kind == 'cancel_error':
+                self.cancel_error = payload
+                self.status.set(payload)
+                self.cancel_button.configure(state='normal')
+                continue
             self.set_busy(False)
             if kind == 'success':
                 self.result = payload
@@ -191,6 +271,8 @@ class Launcher:
                     lines.append('  Connect RosterClient after hosting to reveal starting games.')
                 lines += ['', f"ZIP: {payload['output']}", f"Tracker YAMLs: {payload.get('tracker_dir', '')}"]
                 self.set_reveal('\n'.join(lines))
+            elif kind == 'cancelled':
+                self.status.set(f'Generation cancelled. Diagnostic logs are retained in {self.log_path.parent}.')
             else:
                 try:
                     out = Path(self.output.get()).resolve()
@@ -202,6 +284,27 @@ class Launcher:
                     detail = 'Check that the output folder is writable.'
                 self.status.set('Generation failed. Check game worlds and dependencies. ' + detail)
         self.root.after(100, self.poll)
+
+    def cancel_generation(self):
+        if not self.busy or self.job is None:
+            return
+        self.cancel_button.configure(state='disabled')
+        self.cancel_error = None
+        job = self.job
+        def cancel():
+            try:
+                job.cancel()
+            except Exception as exc:
+                self.events.put(('cancel_error', str(exc)))
+        threading.Thread(target=cancel, daemon=True).start()
+
+    def show_logs(self):
+        from tkinter import messagebox
+        if self.log_path:
+            try:
+                os.startfile(str(self.log_path.parent))
+            except OSError as exc:
+                messagebox.showerror('Open logs', str(exc))
 
     def set_reveal(self, text):
         self.reveal.configure(state='normal')

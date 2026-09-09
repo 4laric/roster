@@ -34,6 +34,19 @@ its replacement. This does not modify an already generated room.
 Only starting games are shown after generation. Full generator diagnostics,
 tracker YAML contents, and AP's web pages may reveal other games.
 
+While generating, the launcher shows elapsed time, time since the last log
+update, and the diagnostic log path. **Show diagnostic logs** opens the output
+folder. `roster_generate_<run>.log` contains live generator output;
+`roster_worker_<run>.log` covers worker startup errors. These files may contain
+spoilers. **Cancel generation** stops that launcher's worker and its child
+processes on Windows; logs remain available. A silent log alone does not prove
+generation is stuck, and some games can open a required-file dialog.
+
+For older launchers, look in the Archipelago installation's `logs` folder for
+the newest `Generate_*.txt`. Old launcher failure logs appear only after the
+generator exits. The current launcher prevents the generator's console input
+prompts from waiting invisibly.
+
 To build the portable ZIP yourself: install `PyInstaller`, `PyYAML`, and
 `websockets`, then run `python build_launcher.py`. The bundle is written to
 `output/Roster-Windows.zip`. The EXE generates with the Windows Archipelago
@@ -90,8 +103,9 @@ The wrapper needs Python and PyYAML; the installer runs generation with its own
 bundled runtime. Install the Roster world and each selected game's world into
 that Archipelago installation first. The client also supports installer-only
 setups through a standalone console mode, described below.
-On failure, non-verbose generator output is saved to an output-directory log
-instead of revealing selected games in the console.
+Generator output is written live to an output-directory log instead of
+revealing selected games in the console. Use `--log-file PATH` to choose its
+location; the default filename includes the seed and a unique suffix.
 
     python roster_generate.py --games ./games --pick 10 --start 2 --archipelago C:\path\to\Archipelago
 

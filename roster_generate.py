@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import json
 import uuid
+import traceback
+from datetime import datetime, timezone
 import os
 import random
 import shutil
@@ -40,6 +42,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--archipelago", default=DEFAULT_ARCHIPELAGO, help="Path to an Archipelago source checkout or installed distribution.")
     parser.add_argument("--verbose", action="store_true", help="Print the slot name mapping and generator output.")
     parser.add_argument("--keep-players", action="store_true", help="Keep the temporary players dir.")
+    parser.add_argument("--log-file", help="Live generator diagnostic log (may contain spoilers).")
     parser.add_argument("--result-file", help="Write success JSON for the launcher.")
     args = parser.parse_args(argv)
     if args.pick < 1 or not 1 <= args.start <= args.pick:
@@ -63,10 +66,6 @@ def main(argv: list[str] | None = None) -> int:
     if source_install:
         sys.path.insert(0, str(ap_path))
 
-        # Source installs use the caller's prepared Python environment.
-        import ModuleUpdate
-
-        ModuleUpdate.update_ran = True
 
     try:
         import yaml as _yaml
@@ -116,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
 
     players_dir = Path(tempfile.mkdtemp(prefix="roster_players_"))
     staging_dir = None
+    log_stream = None
+    log_path = None
     try:
         for path in chosen:
             doc = documents[path]
@@ -144,6 +145,12 @@ def main(argv: list[str] | None = None) -> int:
 
         outputpath = Path(args.outputpath).resolve()
         outputpath.mkdir(parents=True, exist_ok=True)
+        log_path = (Path(args.log_file).resolve() if args.log_file else
+                    outputpath / f"roster_generate_{seed}_{uuid.uuid4().hex[:8]}.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_stream = log_path.open("a", encoding="utf-8", buffering=1)
+        log_phase(log_stream, seed, "prepared; invoking installer" if not source_install else "prepared; invoking source")
+        print(f"Generation log: {log_path} (may contain selected games)", flush=True)
         # A private output directory makes freshness unambiguous even when a
         # same-seed archive already exists with a recent/coarse timestamp.
         staging_dir = Path(tempfile.mkdtemp(prefix=".roster_generation_", dir=outputpath))
@@ -160,27 +167,23 @@ def main(argv: list[str] | None = None) -> int:
         os.chdir(ap_path)
         try:
             if not source_install:
-                # Keep the hidden selection private unless verbose was requested.
-                result = subprocess.run(
-                    [str(generator_exe), *gen_argv],
-                    stdout=None if args.verbose else subprocess.PIPE,
-                    stderr=None if args.verbose else subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace",
-                )
+                result = run_installer_generation([str(generator_exe), *gen_argv], log_stream)
+                log_phase(log_stream, seed, f"installer exit {result.returncode}")
+                if args.verbose:
+                    print(log_path.read_text(encoding="utf-8"), end="")
                 if result.returncode:
-                    print(f"Archipelago generator failed (exit {result.returncode}).", file=sys.stderr)
-                    if not args.verbose:
-                        log_path = outputpath / f"roster_generate_{seed}.log"
-                        log_path.write_text(result.stdout or "No generator output.", encoding="utf-8")
-                        print(f"Details: {log_path} (may reveal selected games)", file=sys.stderr)
+                    print(f"Archipelago generator failed (exit {result.returncode}). See the generation log.", file=sys.stderr)
                     return result.returncode
             else:
-                run_source_generation(gen_argv, args.verbose)
+                run_source_generation(gen_argv, args.verbose, log_stream)
+                log_phase(log_stream, seed, "source generation returned")
         finally:
             os.chdir(cwd)
 
+        log_phase(log_stream, seed, "validating generated output")
         produced = [p for p in staging_dir.iterdir() if p.is_file() and p.suffix.lower() in (".archipelago", ".zip")]
         if len(produced) != 1:
+            log_phase(log_stream, seed, "failed: no unique fresh seed archive")
             print("Generation did not produce one fresh seed archive.", file=sys.stderr)
             return 1
         generated = produced[0]
@@ -210,16 +213,23 @@ def main(argv: list[str] | None = None) -> int:
                                                     "tracker_dir": str(tracker_dir.resolve()),
                                                     "starting_games": starting_games}), encoding="utf-8")
             temporary_result.replace(result_path)
+        log_phase(log_stream, seed, "complete")
         print(f"Seed: {seed}")
         print(f"Output: {target if target else outputpath}")
         return 0 if target else 1
     except (Exception, SystemExit):
+        if log_stream:
+            log_phase(log_stream, seed, "failed")
+            traceback.print_exc(file=log_stream)
+            log_stream.flush()
         if args.verbose:
             raise
         print("Generation failed; no starting games were revealed. Use --verbose only if spoilers are acceptable.",
               file=sys.stderr)
         return 1
     finally:
+        if log_stream:
+            log_stream.close()
         if staging_dir:
             shutil.rmtree(staging_dir, ignore_errors=True)
         if args.keep_players:
@@ -228,34 +238,67 @@ def main(argv: list[str] | None = None) -> int:
             shutil.rmtree(players_dir, ignore_errors=True)
 
 
-def run_source_generation(gen_argv: list[str], verbose: bool) -> None:
-    import Generate
-    from Main import main as run_generation
+def log_phase(stream, seed: int, phase: str) -> None:
+    stream.write(f"[{datetime.now(timezone.utc).isoformat(timespec='seconds')}] "
+                 f"pid={os.getpid()} seed={seed} phase={phase}\n")
+    stream.flush()
+
+
+def run_installer_generation(command: list[str], log_stream):
+    environment = os.environ.copy()
+    environment["PYTHONUNBUFFERED"] = "1"
+    return subprocess.run(command, stdout=log_stream, stderr=subprocess.STDOUT,
+                          stdin=subprocess.DEVNULL, env=environment,
+                          creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                          text=True, encoding="utf-8", errors="replace")
+
+
+class _LiveWriter:
+    def __init__(self, stream, echo=None):
+        self.stream, self.echo = stream, echo
+
+    def write(self, text):
+        result = self.stream.write(text)
+        self.stream.flush()
+        if self.echo:
+            self.echo.write(text)
+            self.echo.flush()
+        return result
+
+    def flush(self):
+        self.stream.flush()
+        if self.echo:
+            self.echo.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def run_source_generation(gen_argv: list[str], verbose: bool, log_stream=None) -> None:
+    import contextlib
+    import io
     import logging
 
-    if verbose:
-        logging.getLogger().setLevel(logging.INFO)
-        logging.basicConfig(level=logging.INFO, force=True)
-        gen_args, gen_seed = Generate.main(Generate.mystery_argparse(gen_argv))
-        run_generation(gen_args, gen_seed)
-    else:
-        import contextlib
-        import io
-
-        sink = io.StringIO()
-        logger = logging.getLogger()
-        handlers, level = logger.handlers[:], logger.level
-        # Existing logging handlers retain their original stderr stream, so
-        # redirect_stderr alone does not prevent hidden-game error disclosure.
-        logger.handlers = [logging.StreamHandler(sink)]
-        logger.setLevel(logging.ERROR)
-        try:
-            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-                gen_args, gen_seed = Generate.main(Generate.mystery_argparse(gen_argv))
-                run_generation(gen_args, gen_seed)
-        finally:
-            logger.handlers = handlers
-            logger.setLevel(level)
+    sink = _LiveWriter(log_stream if log_stream is not None else io.StringIO(), sys.stdout if verbose else None)
+    logger = logging.getLogger()
+    handlers, level = logger.handlers[:], logger.level
+    handler = logging.StreamHandler(sink)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.handlers = [handler]
+    logger.setLevel(logging.INFO)
+    try:
+        # Imports can emit diagnostics too. Keep them inside the live capture.
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            import ModuleUpdate
+            ModuleUpdate.update_ran = True
+            import Generate
+            from Main import main as run_generation
+            gen_args, gen_seed = Generate.main(Generate.mystery_argparse(gen_argv))
+            run_generation(gen_args, gen_seed)
+    finally:
+        sink.flush()
+        logger.handlers = handlers
+        logger.setLevel(level)
 
 
 if __name__ == "__main__":

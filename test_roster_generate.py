@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import types
 import sys
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +19,75 @@ from test_RosterSeed import multidata_bytes
 
 
 class InstallerGeneration(unittest.TestCase):
+    def test_real_installer_child_logs_before_exit_and_has_no_stdin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            log_path, release = root / "live.log", root / "release"
+            errors = []
+            script = ("import sys,time,pathlib\n"
+                      "try: input()\n"
+                      "except EOFError: print('stdin closed')\n"
+                      "print('child is running')\n"
+                      "end=time.monotonic()+5\n"
+                      "while not pathlib.Path(sys.argv[1]).exists() and time.monotonic()<end: time.sleep(.02)\n")
+            with log_path.open("a", encoding="utf-8", buffering=1) as log:
+                def run():
+                    try:
+                        wrapper.run_installer_generation([sys.executable, "-c", script, str(release)], log)
+                    except Exception as error:
+                        errors.append(error)
+                worker = threading.Thread(target=run)
+                worker.start()
+                try:
+                    deadline = time.monotonic() + 4
+                    while "child is running" not in log_path.read_text() and time.monotonic() < deadline:
+                        time.sleep(.02)
+                    self.assertIn("child is running", log_path.read_text())
+                    self.assertIn("stdin closed", log_path.read_text())
+                    self.assertTrue(worker.is_alive(), "output must be visible before child exit")
+                finally:
+                    release.touch()
+                    worker.join(6)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+
+    def test_source_live_log_appends_header_and_records_failure_traceback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            ap, games, output = root / "AP", root / "games", root / "output"
+            ap.mkdir(); games.mkdir()
+            (ap / "Generate.py").touch()
+            (games / "input.yaml").write_text("game: Hidden\n")
+            log_path = root / "diagnostic.log"
+            log_path.write_text("launcher startup header\n")
+            def fail(*args):
+                logging.info("Hidden game: working")
+                print("stdout progress")
+                print("stderr progress", file=sys.stderr)
+                current = log_path.read_text()
+                self.assertIn("launcher startup header", current)
+                self.assertIn("pid=", current)
+                self.assertIn("Hidden game: working", current)
+                self.assertIn("stdout progress", current)
+                self.assertIn("stderr progress", current)
+                raise RuntimeError("Hidden generation failure")
+            generate = types.SimpleNamespace(mystery_argparse=lambda args: args, main=lambda args: (args, 123))
+            stdout, stderr = io.StringIO(), io.StringIO()
+            old_path = sys.path[:]
+            try:
+                with patch.dict(sys.modules, Generate=generate, Main=types.SimpleNamespace(main=fail),
+                                ModuleUpdate=types.SimpleNamespace()), contextlib.redirect_stdout(stdout), \
+                     contextlib.redirect_stderr(stderr):
+                    code = wrapper.main(["--archipelago", str(ap), "--games", str(games),
+                                         "--outputpath", str(output), "--pick", "1", "--seed", "123",
+                                         "--log-file", str(log_path)])
+            finally:
+                sys.path[:] = old_path
+            self.assertEqual(code, 1)
+            self.assertIn("Traceback", log_path.read_text())
+            self.assertIn("Hidden generation failure", log_path.read_text())
+            self.assertNotIn("Hidden", stdout.getvalue() + stderr.getvalue())
+
     def test_source_failure_captures_existing_log_handler(self):
         output = io.StringIO()
         logger = logging.getLogger()
@@ -29,7 +100,8 @@ class InstallerGeneration(unittest.TestCase):
             print("Hidden Game traceback details", file=sys.stderr)
             raise RuntimeError("Hidden Game")
         try:
-            with patch.dict(sys.modules, Generate=fake_generate, Main=types.SimpleNamespace(main=fail)), \
+            with patch.dict(sys.modules, Generate=fake_generate, Main=types.SimpleNamespace(main=fail),
+                            ModuleUpdate=types.SimpleNamespace()), \
                  self.assertRaises(RuntimeError):
                 wrapper.run_source_generation([], False)
             self.assertEqual(output.getvalue(), "")
@@ -154,7 +226,12 @@ class InstallerGeneration(unittest.TestCase):
                     self.assertEqual(command[command.index("--spoiler") + 1], "0")
                     if not code:
                         (Path(command[command.index("--outputpath") + 1]) / "seed.zip").touch()
-                    return subprocess.CompletedProcess(command, code, "Secret Game details")
+                    kwargs["stdout"].write("Secret Game details\n")
+                    kwargs["stdout"].flush()
+                    self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+                    self.assertEqual(kwargs["creationflags"], subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                    self.assertEqual(kwargs["env"]["PYTHONUNBUFFERED"], "1")
+                    return subprocess.CompletedProcess(command, code, None)
 
                 before = os.getcwd()
                 stdout, stderr = io.StringIO(), io.StringIO()
@@ -167,7 +244,9 @@ class InstallerGeneration(unittest.TestCase):
                 self.assertFalse(captured_players[0].exists())
                 self.assertNotIn("Secret Game", stdout.getvalue() + stderr.getvalue())
                 if code:
-                    self.assertIn("Secret Game", (output / "roster_generate_123.log").read_text())
+                    logs = list(output.glob("roster_generate_123_*.log"))
+                    self.assertEqual(len(logs), 1)
+                    self.assertIn("Secret Game", logs[0].read_text())
                 else:
                     tracker = output / "roster_123_tracker"
                     files = list(tracker.glob("*.yaml"))
