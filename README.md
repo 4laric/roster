@@ -24,7 +24,7 @@ generation, and a small client.
 1. Clone this repo next to your Archipelago checkout.
 2. Link the world into Archipelago. On Windows (no admin needed):
 
-       mklink /J C:\path\to\Archipelago\worlds\roster C:\path\to\roster\worlds\roster
+       New-Item -ItemType Junction -Path "C:\path\to\Archipelago\worlds\roster" -Target "C:\path\to\roster\worlds\roster"
 
    On Linux/macOS: `ln -s /path/to/roster/worlds/roster /path/to/Archipelago/worlds/roster`
 3. Put one yaml per game in `games/`. Normal Archipelago yamls; the `name:` is
@@ -32,6 +32,21 @@ generation, and a small client.
    yamls for PC games are included to start from.
 
 ## Generate a seed
+
+The wrapper accepts either a source checkout (`Generate.py`) or a Windows
+installation (`ArchipelagoGenerate.exe`). For an installer at `D:\Archipelago`:
+
+```powershell
+python -m pip install PyYAML
+python roster_generate.py --games ./games --pick 10 --start 2 --archipelago "D:\Archipelago"
+```
+
+The wrapper needs Python and PyYAML; the installer runs generation with its own
+bundled runtime. Install the Roster world and each selected game's world into
+that Archipelago installation first. This support is for generation only; it
+does not change `RosterClient.py`'s runtime requirements.
+On failure, non-verbose generator output is saved to an output-directory log
+instead of revealing selected games in the console.
 
     python roster_generate.py --games ./games --pick 10 --start 2 --archipelago C:\path\to\Archipelago
 

@@ -17,6 +17,7 @@ import argparse
 import os
 import random
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -33,7 +34,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None, help="Seed. Random if omitted.")
     parser.add_argument("--spoiler", type=int, default=0, help="Spoiler level. 0 by default; the log names every game.")
     parser.add_argument("--outputpath", default="./output", help="Where the generated seed lands.")
-    parser.add_argument("--archipelago", default=DEFAULT_ARCHIPELAGO, help="Path to the Archipelago checkout.")
+    parser.add_argument("--archipelago", default=DEFAULT_ARCHIPELAGO, help="Path to an Archipelago source checkout or installed distribution.")
     parser.add_argument("--verbose", action="store_true", help="Print the slot name mapping and generator output.")
     parser.add_argument("--keep-players", action="store_true", help="Keep the temporary players dir.")
     return parser.parse_args(argv)
@@ -60,18 +61,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     ap_path = Path(args.archipelago).resolve()
-    if not (ap_path / "Generate.py").is_file():
-        print(f"No Generate.py in {ap_path}", file=sys.stderr)
+    source_install = (ap_path / "Generate.py").is_file()
+    generator_exe = ap_path / "ArchipelagoGenerate.exe"
+    if not source_install and not generator_exe.is_file():
+        print(f"No Generate.py or ArchipelagoGenerate.exe in {ap_path}", file=sys.stderr)
         return 2
-    sys.path.insert(0, str(ap_path))
+    if source_install:
+        sys.path.insert(0, str(ap_path))
 
-    # The checkout's ModuleUpdate wants to reinstall mismatched requirements and prompts
-    # for it interactively. We are not doing that.
-    import ModuleUpdate
+        # Source installs use the caller's prepared Python environment.
+        import ModuleUpdate
 
-    ModuleUpdate.update_ran = True
+        ModuleUpdate.update_ran = True
 
-    import yaml as _yaml  # provided by the Archipelago checkout's environment
+    try:
+        import yaml as _yaml
+    except ImportError:
+        print("Roster needs PyYAML in your Python environment. Run: python -m pip install PyYAML", file=sys.stderr)
+        return 2
 
     games_dir = Path(args.games).resolve()
     yaml_paths = sorted(p for p in games_dir.iterdir() if p.suffix.lower() in (".yaml", ".yml"))
@@ -135,9 +142,6 @@ def main(argv: list[str] | None = None) -> int:
         outputpath.mkdir(parents=True, exist_ok=True)
         start_time = __import__("time").time() - 1
 
-        import Generate
-        from Main import main as run_generation
-
         gen_argv = [
             "--player_files_path", str(players_dir),
             "--outputpath", str(outputpath),
@@ -149,22 +153,23 @@ def main(argv: list[str] | None = None) -> int:
         cwd = os.getcwd()
         os.chdir(ap_path)
         try:
-            import logging
-
-            if args.verbose:
-                logging.getLogger().setLevel(logging.INFO)
-                logging.basicConfig(level=logging.INFO, force=True)
-                gen_args, gen_seed = Generate.main(Generate.mystery_argparse(gen_argv))
-                run_generation(gen_args, gen_seed)
+            if not source_install:
+                # Keep the hidden selection private unless verbose was requested.
+                result = subprocess.run(
+                    [str(generator_exe), *gen_argv],
+                    stdout=None if args.verbose else subprocess.PIPE,
+                    stderr=None if args.verbose else subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                )
+                if result.returncode:
+                    print(f"Archipelago generator failed (exit {result.returncode}).", file=sys.stderr)
+                    if not args.verbose:
+                        log_path = outputpath / f"roster_generate_{seed}.log"
+                        log_path.write_text(result.stdout or "No generator output.", encoding="utf-8")
+                        print(f"Details: {log_path} (may reveal selected games)", file=sys.stderr)
+                    return result.returncode
             else:
-                import contextlib
-                import io
-
-                logging.getLogger().setLevel(logging.ERROR)
-                sink = io.StringIO()
-                with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-                    gen_args, gen_seed = Generate.main(Generate.mystery_argparse(gen_argv))
-                    run_generation(gen_args, gen_seed)
+                run_source_generation(gen_argv, args.verbose)
         finally:
             os.chdir(cwd)
 
@@ -181,6 +186,27 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Players dir: {players_dir}")
         else:
             shutil.rmtree(players_dir, ignore_errors=True)
+
+
+def run_source_generation(gen_argv: list[str], verbose: bool) -> None:
+    import Generate
+    from Main import main as run_generation
+    import logging
+
+    if verbose:
+        logging.getLogger().setLevel(logging.INFO)
+        logging.basicConfig(level=logging.INFO, force=True)
+        gen_args, gen_seed = Generate.main(Generate.mystery_argparse(gen_argv))
+        run_generation(gen_args, gen_seed)
+    else:
+        import contextlib
+        import io
+
+        logging.getLogger().setLevel(logging.ERROR)
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            gen_args, gen_seed = Generate.main(Generate.mystery_argparse(gen_argv))
+            run_generation(gen_args, gen_seed)
 
 
 if __name__ == "__main__":
